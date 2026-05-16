@@ -1,10 +1,19 @@
+import argparse
+
 from scapy.all import *
 
 import auxiliar
 
-stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
 
-# primer requisito - capturar paquetes con sniff() usando callback
+def argument_parser():
+    parser = argparse.ArgumentParser(description="Packet sniffer")
+    parser.add_argument("-f", "--filter", help="BPF filter. Ej: 'tcp port 80'")
+    parser.add_argument("-i", "--interface", help="Network interface. Ej: 'eth0'")
+    args = parser.parse_args()
+    return args
+
+
+stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
 
 
 def protocol_counter(packet):
@@ -26,8 +35,8 @@ def protocol_counter(packet):
                 "FA": "FIN-ACK --- Closing",
                 "E": "ECE --- Congestion notification",
                 "C": "CWR --- Congestion's answer",
-                "SE": "SYN-ECE --- Handsahge with ECN enable"
-                }
+                "SE": "SYN-ECE --- Handsahge with ECN enable",
+            }
             flags = str(packet[TCP].flags)  # flags a string para poder mapearlo
             description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
@@ -69,13 +78,39 @@ def protocol_counter(packet):
 
 def main():
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
+    args = argument_parser()
     try:
         sniff(
-            prn=protocol_counter, store=False
+            prn=protocol_counter, store=False, filter=args.filter, iface=args.interface
         )  # este false evita que me explote la compu o sea, evita que me guarde los paquetes en memoria
+    except Scapy_Exception as e:
+        print(f"Invalid filter: {e}\nThese are some examples")
+        examples = [
+            "tcp",
+            "udp",
+            "icmp",
+            "arp",
+            "tcp or udp",
+            "tcp and port 443",
+            "udp and port 53",
+            "not arp",
+            "host 192.168.0.1",
+            "src host 192.168.0.1",
+            "dst host 192.168.0.1",
+            "tcp and host 192.168.0.1",
+            "port 443",
+            "src port 53",
+            "dst port 80",
+        ]
+        auxiliar.show_options(examples)
+        return
+    except ValueError as e:
+        print(f"Invalid interface: {e}\nThese are some examples")
+        examples = get_if_list()
+        auxiliar.show_options(examples)
+        return
     except KeyboardInterrupt:
         pass
-
     total = sum(stats.values())
     print(f"\nTotal packets: {total} --- stats={stats}")
 

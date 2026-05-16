@@ -1,5 +1,3 @@
-import re
-import sys
 from datetime import datetime
 
 
@@ -17,7 +15,6 @@ def save_file(data, idx):
 def show_options(options):
     for idx, value in enumerate(options):
         print(f"{idx + 1}. {value}")
-    print(f"{len(options) + 1}. Exit")
 
 
 def validate_number(options):
@@ -61,7 +58,7 @@ def validate_string(options, text, type):
         elif string in options:
             print("There is one with the same name | Try again")
         elif not string.endswith(".mp3") and type == 0:
-            print(f"The name needs to end with a '.mp3' | Try again")
+            print("The name needs to end with a '.mp3' | Try again")
         else:
             return string
 
