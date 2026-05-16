@@ -13,10 +13,26 @@ def protocol_counter(packet):
         dst = packet[IP].dst  # ip destino
 
         if TCP in packet:
-            flags = packet[TCP].flags  # flags
+            flags_map = {
+                "S": "SYN --- Starting conexion",
+                "A": "ACK --- Reception confirmed",
+                "F": "FIN --- Closing conexion",
+                "R": "RST --- Force closing conexion ",
+                "P": "PSH --- Process this right now - real data",
+                "U": "URG --- Top priority data (rare)",
+                "SA": "SYN-ACK --- Conexion accepted",
+                "PA": "PSH-ACK --- DATA",
+                "RA": "RST-ACK --- Reset",
+                "FA": "FIN-ACK --- Closing",
+                "E": "ECE --- Congestion notification",
+                "C": "CWR --- Congestion's answer",
+                "SE": "SYN-ECE --- Handsahge with ECN enable"
+                }
+            flags = str(packet[TCP].flags)  # flags a string para poder mapearlo
+            description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
             dport = packet[TCP].dport  # puerto destino
-            print(f"[TCP] {src}:{sport} → {dst}:{dport} | flags={flags}")
+            print(f"[TCP] {src}:{sport} → {dst}:{dport} | flags={description}")
             stats["TCP"] += 1
 
         elif UDP in packet:
@@ -37,6 +53,7 @@ def protocol_counter(packet):
             stats["ICMP"] += 1
 
         else:
+            print(f"Just IP --- {packet}")
             stats["IP"] += 1  # Solo IP :(
 
     elif ARP in packet:
