@@ -1,14 +1,21 @@
 import argparse
+from datetime import datetime
 
 from scapy.all import *
 
 import auxiliar
 
 
+def get_path():
+    now = datetime.now()
+    return f"sniffer_{now.strftime('%Y%m%d_%H%M%S')}.pcap"
+
+
 def argument_parser():
     parser = argparse.ArgumentParser(description="Packet sniffer")
     parser.add_argument("-f", "--filter", help="BPF filter. Ej: 'tcp port 80'")
     parser.add_argument("-i", "--interface", help="Network interface. Ej: 'eth0'")
+    # tendria q agregar un parametro tipo count asi no siempre hago control+c
     args = parser.parse_args()
     return args
 
@@ -80,8 +87,11 @@ def main():
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
     args = argument_parser()
     try:
-        sniff(
-            prn=protocol_counter, store=False, filter=args.filter, iface=args.interface
+        paquetes = sniff(
+            prn=protocol_counter,
+            store=False,
+            filter=args.filter,
+            iface=args.interface,
         )  # este false evita que me explote la compu o sea, evita que me guarde los paquetes en memoria
     except Scapy_Exception as e:
         print(f"Invalid filter: {e}\nThese are some examples")
@@ -113,6 +123,9 @@ def main():
         pass
     total = sum(stats.values())
     print(f"\nTotal packets: {total} --- stats={stats}")
+    path = get_path()
+    wrpcap(path, paquetes)
+    print(f"Saved to {path}")
 
 
 main()
