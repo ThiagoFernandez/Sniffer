@@ -1,9 +1,12 @@
 import argparse
 from datetime import datetime
 
+import colorama
 from scapy.all import *
 
 import auxiliar
+
+colorama.init()
 
 
 def get_path():
@@ -21,9 +24,11 @@ def argument_parser():
 
 
 stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
+captured = []
 
 
 def protocol_counter(packet):
+    captured.append(packet)
     if IP in packet:
         src = packet[IP].src  # ip origen
         dst = packet[IP].dst  # ip destino
@@ -48,13 +53,17 @@ def protocol_counter(packet):
             description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
             dport = packet[TCP].dport  # puerto destino
-            print(f"[TCP] {src}:{sport} → {dst}:{dport} | flags={description}")
+            print(
+                f"{colorama.Fore.GREEN}[TCP]{colorama.Fore.RESET} {src}:{sport} → {dst}:{dport} | flags={description}"
+            )
             stats["TCP"] += 1
 
         elif UDP in packet:
             sport = packet[UDP].sport  # puerto origen
             dport = packet[UDP].dport  # puerto destino
-            print(f"[UDP] {src}:{sport} → {dst}:{dport}")
+            print(
+                f"{colorama.Fore.BLUE}[UDP]{colorama.Fore.RESET} {src}:{sport} → {dst}:{dport}"
+            )
             stats["UDP"] += 1
 
         elif ICMP in packet:
@@ -65,7 +74,9 @@ def protocol_counter(packet):
                 11: "time-exceeded",
             }
             tipo = types.get(packet[ICMP].type, packet[ICMP].type)
-            print(f"[ICMP] {src} → {dst} | tipo={tipo}")
+            print(
+                f"{colorama.Fore.YELLOW}[ICMP]{colorama.Fore.RESET} {src} → {dst} | tipo={tipo}"
+            )
             stats["ICMP"] += 1
 
         else:
@@ -77,17 +88,19 @@ def protocol_counter(packet):
         hwsrc = packet[ARP].hwsrc  # mac origen
         hwdst = packet[ARP].hwdst  # mac destino
         op = types.get(packet[ARP].op, packet[ARP].op)
-        print(f"[ARP] {hwsrc} --> {hwdst} | {op}")
+        print(
+            f"{colorama.Fore.CYAN}[ARP]{colorama.Fore.RESET} {hwsrc} --> {hwdst} | {op}"
+        )
         stats["ARP"] += 1  # ARP
     else:
-        stats["OTHER"] += 1  # ARP, etc
+        stats["OTHER"] += 1  # IPv6, etc
 
 
 def main():
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
     args = argument_parser()
     try:
-        paquetes = sniff(
+        sniff(
             prn=protocol_counter,
             store=False,
             filter=args.filter,
@@ -124,7 +137,7 @@ def main():
     total = sum(stats.values())
     print(f"\nTotal packets: {total} --- stats={stats}")
     path = get_path()
-    wrpcap(path, paquetes)
+    wrpcap(path, captured)
     print(f"Saved to {path}")
 
 
