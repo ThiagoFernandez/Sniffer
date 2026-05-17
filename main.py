@@ -1,4 +1,6 @@
 import argparse
+import time
+from collections import defaultdict
 from datetime import datetime
 
 import colorama
@@ -7,6 +9,8 @@ from scapy.all import *
 import auxiliar
 
 colorama.init()
+SYN_THRESOLD = 10  # 10 porque es estandar pero podes poner lo q vos queres aca
+SYN_WINDOW = 3  # ACA LO MISMO, CON 3 segundos ya basta para saber q se esta haciendo un ataque SYN flood o port scanning
 
 
 def get_path():
@@ -25,6 +29,7 @@ def argument_parser():
 
 stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
 captured = []
+syn_tracker = defaultdict(list)
 
 
 def protocol_counter(packet):
@@ -50,6 +55,18 @@ def protocol_counter(packet):
                 "SE": "SYN-ECE --- Handsahge with ECN enable",
             }
             flags = str(packet[TCP].flags)  # flags a string para poder mapearlo
+            if flags == "S":
+                now = time.time()
+                syn_tracker[src].append(now)  # cargo la ip y el tiempo
+                syn_tracker[src] = [
+                    t for t in syn_tracker[src] if now - t < SYN_WINDOW
+                ]  # la limpio la lista (sliding window algorithm)
+                if (
+                    len(syn_tracker[src]) > SYN_THRESOLD
+                ):  # si hay mas de 10 paquetes en el window, es un ataque SYN flood o port scanning
+                    print(
+                        f"{colorama.Fore.RED}[SYN FLOOD/PORT SCANNING] {colorama.Fore.RESET}from{src}"
+                    )
             description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
             dport = packet[TCP].dport  # puerto destino
