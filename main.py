@@ -11,10 +11,13 @@ import auxiliar
 colorama.init()
 SYN_THRESOLD = 10  # 10 porque es estandar pero podes poner lo q vos queres aca
 SYN_WINDOW = 3  # ACA LO MISMO, CON 3 segundos ya basta para saber q se esta haciendo un ataque SYN flood o port scanning
+ARP_THRESOLD = 20  # lo subo aca porque es normal q algunos dispositivos realicen arp request consecutivos pero no 20(creo)
+ARP_WINDOW = 3  # lo mismo que en SYN
 
 stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
 captured = []
 syn_tracker = defaultdict(list)
+arp_tracker = defaultdict(list)
 args = None
 
 
@@ -140,6 +143,16 @@ def protocol_counter(packet):
         hwsrc = packet[ARP].hwsrc  # mac origen
         hwdst = packet[ARP].hwdst  # mac destino
         op = types.get(packet[ARP].op, packet[ARP].op)
+        if op == "request(who-has)":
+            now = time.time()
+            arp_tracker[hwsrc].append(now)
+            arp_tracker[hwsrc] = [t for t in arp_tracker[hwsrc] if now - t < ARP_WINDOW]
+            if len(arp_tracker[hwsrc]) > ARP_THRESOLD:
+                if not args.silent:
+                    print(
+                        f"{colorama.Fore.RED}[ARP SCAN] {colorama.Fore.RESET}from {hwsrc}"
+                    )
+
         if not args.silent:
             print(
                 f"{colorama.Fore.CYAN}[ARP]{colorama.Fore.RESET} {hwsrc} --> {hwdst} | {op}"
