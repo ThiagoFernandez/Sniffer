@@ -2,6 +2,7 @@ import argparse
 import time
 from collections import defaultdict
 from datetime import datetime
+from turtle import write
 
 import colorama
 from scapy.all import *
@@ -14,8 +15,8 @@ SYN_WINDOW = 3  # ACA LO MISMO, CON 3 segundos ya basta para saber q se esta hac
 ARP_THRESOLD = 20  # lo subo aca porque es normal q algunos dispositivos realicen arp request consecutivos pero no 20(creo)
 ARP_WINDOW = 3  # lo mismo que en SYN
 
+writer = None
 stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
-captured = []
 syn_tracker = defaultdict(list)
 arp_tracker = defaultdict(list)
 args = None
@@ -46,7 +47,8 @@ def argument_parser():
 
 
 def protocol_counter(packet):
-    captured.append(packet)
+    if writer:
+            writer.write(packet) # este cambio hace q vaya al disco y no me piole la ram
     if IP in packet:
         src = packet[IP].src  # ip origen
         dst = packet[IP].dst  # ip destino
@@ -161,11 +163,27 @@ def protocol_counter(packet):
     else:
         stats["OTHER"] += 1  # IPv6, etc
 
+    if not args.silent:
+            show_payload(packet)
+
+def show_payload(packet, indent="    "):
+    if Raw not in packet:
+        return  # protocolo puro, sin datos de aplicación (ej: SYN, ARP)
+
+    data = bytes(packet[Raw].load)
+    try:
+        txt = data.decode("utf-8")
+        print(f"{indent}└─ payload ({len(data)}b): {txt!r}")
+    except UnicodeDecodeError:
+        print(f"{indent}└─ payload ({len(data)}b, binario): {data[:64].hex()}")
 
 def main():
-    global args
+    global args, writer
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
     args = argument_parser()
+
+    path = get_path()
+    writer = PcapWriter(path, append=True, sync=True)
 
     try:
         sniff(
@@ -203,10 +221,12 @@ def main():
         return
     except KeyboardInterrupt:
         pass
+    finally:
+        if writer:
+            writer.close()
     total = sum(stats.values())
     print(f"\nTotal packets: {total} --- stats={stats}")
     path = get_path()
-    wrpcap(path, captured)
     print(f"Saved to {path}")
 
 
