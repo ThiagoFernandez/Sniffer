@@ -1,0 +1,33 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+.env
+
+# Build / distribucion
+build/
+dist/
+*.egg-info/
+
+# Editores e IDEs
+.vscode/
+.idea/
+*.swp
+
+# Secretos y datos locales (NO commitear)
+*.key
+secret.key
+*.sqlite3
+db.sqlite3
+*.log
+*.pcap
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
