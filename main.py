@@ -2,7 +2,6 @@ import argparse
 import time
 from collections import defaultdict
 from datetime import datetime
-from turtle import write
 
 import colorama
 from scapy.all import *
