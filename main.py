@@ -9,16 +9,97 @@ from scapy.all import *
 import auxiliar
 
 colorama.init()
-SYN_THRESOLD = 10  # 10 porque es estandar pero podes poner lo q vos queres aca
-SYN_WINDOW = 3  # ACA LO MISMO, CON 3 segundos ya basta para saber q se esta haciendo un ataque SYN flood o port scanning
-ARP_THRESOLD = 20  # lo subo aca porque es normal q algunos dispositivos realicen arp request consecutivos pero no 20(creo)
-ARP_WINDOW = 3  # lo mismo que en SYN
+
+# --- SYN flood / port scanning: muchos SYN desde la MISMA ip ---
+SYN_THRESHOLD = 10
+SYN_WINDOW = 3
+
+# --- ARP scan: muchos requests desde la MISMA mac ---
+ARP_THRESHOLD = 20
+ARP_WINDOW = 3
+
+# --- ARP / CAM flood: muchas MACs DISTINTAS en la ventana ---
+ARP_FLOOD_WINDOW = 5
+ARP_FLOOD_THRESHOLD = 50  # MACs distintas, no paquetes
+
+ALERT_COOLDOWN = 5  # segundos minimos entre alertas repetidas del mismo (tipo, origen)
+TRACKER_CAP = 1000  # a partir de aca vale la pena pagar la limpieza O(n)
 
 writer = None
+pcap_path = None
 stats = {"IP": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "ARP": 0, "OTHER": 0}
-syn_tracker = defaultdict(list)
-arp_tracker = defaultdict(list)
+syn_tracker = defaultdict(list)  # ip  -> [timestamps]
+arp_tracker = defaultdict(list)  # mac -> [timestamps]
+arp_flood_tracker = {}  # mac -> ultima vez vista
+alert_cooldown = {}  # (tipo, origen) -> ultima alerta
 args = None
+
+
+# ---------------------------------------------------------------- deteccion
+
+
+def alert(tipo, origen, mensaje, now):
+    """Imprime como mucho una alerta cada ALERT_COOLDOWN por (tipo, origen).
+
+    Sin esto, una vez cruzado el umbral imprimis una linea por cada paquete
+    que llega y te tapa la consola justo cuando mas querias leerla.
+    """
+    if args.silent:
+        return
+
+    clave = (tipo, origen)
+    if now - alert_cooldown.get(clave, 0.0) < ALERT_COOLDOWN:
+        return
+    alert_cooldown[clave] = now
+
+    # mismo patron amortizado que el resto: chequeo O(1), limpieza O(n) solo si crecio
+    if len(alert_cooldown) > TRACKER_CAP:
+        for k in [k for k, t in alert_cooldown.items() if now - t >= ALERT_COOLDOWN]:
+            del alert_cooldown[k]
+
+    print(f"{colorama.Fore.RED}[{tipo}]{colorama.Fore.RESET} {mensaje}")
+
+
+def prune_tracker(tracker, now, window):
+    """Borra las claves cuyos timestamps ya vencieron todos.
+
+    Sin esto, los defaultdict crecen una clave por cada ip/mac vista y nunca
+    se achican: bajo un flood con origenes rotativos el ataque te llena la
+    RAM del propio sniffer.
+    """
+    if len(tracker) <= TRACKER_CAP:
+        return
+    muertas = [k for k, ts in tracker.items() if not ts or now - ts[-1] >= window]
+    for k in muertas:
+        del tracker[k]
+
+
+def arp_flood_check(mac, now):
+    """Cardinalidad de MACs distintas sobre una ventana deslizante.
+
+    El dict es mac -> ultima vez vista: una MAC que sigue hablando se refresca
+    sola, y la que aparecio una vez y desaparecio se cae de la ventana.
+    """
+    arp_flood_tracker[mac] = now  # mutacion, NO reasignacion del nombre
+
+    if len(arp_flood_tracker) <= ARP_FLOOD_THRESHOLD:
+        return  # O(1), caso comun: ni siquiera con basura vieja llegas al umbral
+
+    # recien aca pagas el O(n). Lista primero: no se puede borrar mientras iteras
+    vencidas = [m for m, t in arp_flood_tracker.items() if now - t >= ARP_FLOOD_WINDOW]
+    for m in vencidas:
+        del arp_flood_tracker[m]
+
+    if len(arp_flood_tracker) > ARP_FLOOD_THRESHOLD:
+        alert(
+            "ARP FLOOD",
+            None,  # la mac del ultimo paquete no dice nada si el atacante las rota
+            f"{len(arp_flood_tracker)} MACs distintas en {ARP_FLOOD_WINDOW}s",
+            now,
+        )
+
+
+# ---------------------------------------------------------------- setup
 
 
 def get_path():
@@ -33,7 +114,6 @@ def argument_parser():
     parser.add_argument(
         "-s", "--silent", action="store_true", help="Silent mode - only save .pcap"
     )
-    # tendria q agregar un parametro tipo count asi no siempre hago control+c
     parser.add_argument(
         "-c",
         "--count",
@@ -41,13 +121,16 @@ def argument_parser():
         default=0,
         help="Number of packets to capture (0 = infinite)",
     )
-    args = parser.parse_args()
-    return args
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------- handler
 
 
 def protocol_counter(packet):
     if writer:
-            writer.write(packet) # este cambio hace q vaya al disco y no me piole la ram
+        writer.write(packet)  # este cambio hace q vaya al disco y no me piole la ram
+
     if IP in packet:
         src = packet[IP].src  # ip origen
         dst = packet[IP].dst  # ip destino
@@ -69,10 +152,11 @@ def protocol_counter(packet):
                             host = line.split(":", 1)[1].strip()
                             break
 
-                    if host and path:
+                    if host and path and not args.silent:
                         print(f"[HTTP] {src} → {host}{path}")
                 except Exception:
                     pass
+
             flags_map = {
                 "S": "SYN --- Starting conexion",
                 "A": "ACK --- Reception confirmed",
@@ -86,28 +170,32 @@ def protocol_counter(packet):
                 "FA": "FIN-ACK --- Closing",
                 "E": "ECE --- Congestion notification",
                 "C": "CWR --- Congestion's answer",
-                "SE": "SYN-ECE --- Handsahge with ECN enable",
+                "SE": "SYN-ECE --- Handshake with ECN enable",
             }
             flags = str(packet[TCP].flags)  # flags a string para poder mapearlo
+
             if flags == "S":
                 now = time.time()
                 syn_tracker[src].append(now)  # cargo la ip y el tiempo
                 syn_tracker[src] = [
                     t for t in syn_tracker[src] if now - t < SYN_WINDOW
-                ]  # la limpio la lista (sliding window algorithm)
-                if (
-                    len(syn_tracker[src]) > SYN_THRESOLD
-                ):  # si hay mas de 10 paquetes en el window, es un ataque SYN flood o port scanning
-                    if not args.silent:
-                        print(
-                            f"{colorama.Fore.RED}[SYN FLOOD/PORT SCANNING] {colorama.Fore.RESET}from{src}"
-                        )
+                ]  # limpio la lista (sliding window)
+                if len(syn_tracker[src]) > SYN_THRESHOLD:
+                    alert(
+                        "SYN FLOOD/PORT SCAN",
+                        src,
+                        f"from {src} ({len(syn_tracker[src])} SYN en {SYN_WINDOW}s)",
+                        now,
+                    )
+                prune_tracker(syn_tracker, now, SYN_WINDOW)
+
             description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
             dport = packet[TCP].dport  # puerto destino
             if not args.silent:
                 print(
-                    f"{colorama.Fore.GREEN}[TCP]{colorama.Fore.RESET} {src}:{sport} → {dst}:{dport} | flags={description}"
+                    f"{colorama.Fore.GREEN}[TCP]{colorama.Fore.RESET} "
+                    f"{src}:{sport} → {dst}:{dport} | flags={description}"
                 )
             stats["TCP"] += 1
 
@@ -116,7 +204,8 @@ def protocol_counter(packet):
             dport = packet[UDP].dport  # puerto destino
             if not args.silent:
                 print(
-                    f"{colorama.Fore.BLUE}[UDP]{colorama.Fore.RESET} {src}:{sport} → {dst}:{dport}"
+                    f"{colorama.Fore.BLUE}[UDP]{colorama.Fore.RESET} "
+                    f"{src}:{sport} → {dst}:{dport}"
                 )
             stats["UDP"] += 1
 
@@ -130,7 +219,8 @@ def protocol_counter(packet):
             tipo = types.get(packet[ICMP].type, packet[ICMP].type)
             if not args.silent:
                 print(
-                    f"{colorama.Fore.YELLOW}[ICMP]{colorama.Fore.RESET} {src} → {dst} | tipo={tipo}"
+                    f"{colorama.Fore.YELLOW}[ICMP]{colorama.Fore.RESET} "
+                    f"{src} → {dst} | tipo={tipo}"
                 )
             stats["ICMP"] += 1
 
@@ -141,29 +231,52 @@ def protocol_counter(packet):
 
     elif ARP in packet:
         types = {1: "request(who-has)", 2: "reply(is-at)"}
-        hwsrc = packet[ARP].hwsrc  # mac origen
-        hwdst = packet[ARP].hwdst  # mac destino
+        hwsrc = packet[ARP].hwsrc  # mac origen (payload ARP)
+        hwdst = packet[ARP].hwdst  # mac destino (payload ARP)
         op = types.get(packet[ARP].op, packet[ARP].op)
+        now = time.time()
+
+        # La CAM del switch se llena con el MAC del frame Ethernet, no con el
+        # del payload ARP. Normalmente coinciden; un atacante puede separarlos.
+        ether_src = packet[Ether].src if Ether in packet else hwsrc
+
+        # el flood se cuenta sobre TODOS los ARP (requests, replies, gratuitos)
+        arp_flood_check(ether_src, now)
+
+        if ether_src != hwsrc:
+            alert(
+                "ARP MISMATCH",
+                hwsrc,
+                f"Ether.src={ether_src} != ARP.hwsrc={hwsrc}",
+                now,
+            )
+
+        # el scan si es especifico de los requests: quien barre la subnet pregunta
         if op == "request(who-has)":
-            now = time.time()
             arp_tracker[hwsrc].append(now)
             arp_tracker[hwsrc] = [t for t in arp_tracker[hwsrc] if now - t < ARP_WINDOW]
-            if len(arp_tracker[hwsrc]) > ARP_THRESOLD:
-                if not args.silent:
-                    print(
-                        f"{colorama.Fore.RED}[ARP SCAN] {colorama.Fore.RESET}from {hwsrc}"
-                    )
+            if len(arp_tracker[hwsrc]) > ARP_THRESHOLD:
+                alert(
+                    "ARP SCAN",
+                    hwsrc,
+                    f"from {hwsrc} ({len(arp_tracker[hwsrc])} requests en {ARP_WINDOW}s)",
+                    now,
+                )
+            prune_tracker(arp_tracker, now, ARP_WINDOW)
 
         if not args.silent:
             print(
-                f"{colorama.Fore.CYAN}[ARP]{colorama.Fore.RESET} {hwsrc} --> {hwdst} | {op}"
+                f"{colorama.Fore.CYAN}[ARP]{colorama.Fore.RESET} "
+                f"{hwsrc} --> {hwdst} | {op}"
             )
-        stats["ARP"] += 1  # ARP
+        stats["ARP"] += 1
+
     else:
         stats["OTHER"] += 1  # IPv6, etc
 
     if not args.silent:
-            show_payload(packet)
+        show_payload(packet)
+
 
 def show_payload(packet, indent="    "):
     if Raw not in packet:
@@ -176,22 +289,27 @@ def show_payload(packet, indent="    "):
     except UnicodeDecodeError:
         print(f"{indent}└─ payload ({len(data)}b, binario): {data[:64].hex()}")
 
+
+# ---------------------------------------------------------------- main
+
+
 def main():
-    global args, writer
+    global args, writer, pcap_path
+
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
     args = argument_parser()
 
-    path = get_path()
-    writer = PcapWriter(path, append=True, sync=True)
+    pcap_path = get_path()  # se guarda una sola vez y se reusa al final
+    writer = PcapWriter(pcap_path, append=True, sync=True)
 
     try:
         sniff(
             prn=protocol_counter,
-            store=False,
+            store=False,  # evita que me guarde los paquetes en memoria
             filter=args.filter,
             iface=args.interface,
             count=args.count,
-        )  # este false evita que me explote la compu o sea, evita que me guarde los paquetes en memoria
+        )
     except Scapy_Exception as e:
         print(f"Invalid filter: {e}\nThese are some examples")
         examples = [
@@ -213,20 +331,20 @@ def main():
         ]
         auxiliar.show_options(examples)
         return
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         print(f"Invalid interface: {e}\nThese are some examples")
-        examples = get_if_list()
-        auxiliar.show_options(examples)
+        auxiliar.show_options(get_if_list())
         return
     except KeyboardInterrupt:
         pass
     finally:
         if writer:
             writer.close()
+
     total = sum(stats.values())
     print(f"\nTotal packets: {total} --- stats={stats}")
-    path = get_path()
-    print(f"Saved to {path}")
+    print(f"Saved to {pcap_path}")
 
 
-main()
+if __name__ == "__main__":
+    main()
