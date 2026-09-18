@@ -1,14 +1,17 @@
 import argparse
+import logging
 import time
 from collections import defaultdict
 from datetime import datetime
 
-import colorama
 from scapy.all import *
 
 import auxiliar
+from logger_config import configure_logger  # Importamos la configuracion externa
 
-colorama.init()
+# Obtenemos el logger global (se configurara mas adelante en el main)
+logger = logging.getLogger("sniffer")
+
 
 # --- SYN flood / port scanning: muchos SYN desde la MISMA ip ---
 SYN_THRESHOLD = 10
@@ -38,15 +41,12 @@ args = None
 # ---------------------------------------------------------------- deteccion
 
 
-def alert(tipo, origen, mensaje, now):
+def alert(tipo, origen, mensaje, now, meta=None):
     """Imprime como mucho una alerta cada ALERT_COOLDOWN por (tipo, origen).
 
     Sin esto, una vez cruzado el umbral imprimis una linea por cada paquete
     que llega y te tapa la consola justo cuando mas querias leerla.
     """
-    if args.silent:
-        return
-
     clave = (tipo, origen)
     if now - alert_cooldown.get(clave, 0.0) < ALERT_COOLDOWN:
         return
@@ -57,7 +57,8 @@ def alert(tipo, origen, mensaje, now):
         for k in [k for k, t in alert_cooldown.items() if now - t >= ALERT_COOLDOWN]:
             del alert_cooldown[k]
 
-    print(f"{colorama.Fore.RED}[{tipo}]{colorama.Fore.RESET} {mensaje}")
+    # Pasamos la metadata estructurada al logger mediante el kwarg extra
+    logger.warning("[%s] %s", tipo, mensaje, extra={"alert_meta": meta or {}})
 
 
 def prune_tracker(tracker, now, window):
@@ -96,11 +97,14 @@ def arp_flood_check(mac, now):
             None,  # la mac del ultimo paquete no dice nada si el atacante las rota
             f"{len(arp_flood_tracker)} MACs distintas en {ARP_FLOOD_WINDOW}s",
             now,
+            meta={
+                "event": "arp_flood",
+                "distinct_macs": len(arp_flood_tracker),
+                "window_s": ARP_FLOOD_WINDOW
+            }
         )
 
-
 # ---------------------------------------------------------------- setup
-
 
 def get_path():
     now = datetime.now()
@@ -123,9 +127,7 @@ def argument_parser():
     )
     return parser.parse_args()
 
-
 # ---------------------------------------------------------------- handler
-
 
 def protocol_counter(packet):
     if writer:
@@ -136,7 +138,8 @@ def protocol_counter(packet):
         dst = packet[IP].dst  # ip destino
 
         if TCP in packet:
-            if packet[TCP].dport == 80:  # http
+            # Optimizacion: Evita procesar payload HTTP si estamos en modo silencioso y q no detone una papa con cables
+            if packet[TCP].dport == 80 and logger.isEnabledFor(logging.INFO):  # http
                 payload = bytes(packet[TCP].payload)
                 try:
                     txt = payload.decode("utf-8", errors="ignore")
@@ -152,8 +155,8 @@ def protocol_counter(packet):
                             host = line.split(":", 1)[1].strip()
                             break
 
-                    if host and path and not args.silent:
-                        print(f"[HTTP] {src} → {host}{path}")
+                    if host and path:
+                        logger.info("[HTTP] %s → %s%s", src, host, path)
                 except Exception:
                     pass
 
@@ -186,27 +189,31 @@ def protocol_counter(packet):
                         src,
                         f"from {src} ({len(syn_tracker[src])} SYN en {SYN_WINDOW}s)",
                         now,
+                        meta={
+                            "event": "syn_flood",
+                            "src_ip": src,
+                            "syn_count": len(syn_tracker[src]),
+                            "window_s": SYN_WINDOW
+                        }
                     )
                 prune_tracker(syn_tracker, now, SYN_WINDOW)
 
             description = flags_map.get(flags, flags)
             sport = packet[TCP].sport  # puerto origen
             dport = packet[TCP].dport  # puerto destino
-            if not args.silent:
-                print(
-                    f"{colorama.Fore.GREEN}[TCP]{colorama.Fore.RESET} "
-                    f"{src}:{sport} → {dst}:{dport} | flags={description}"
-                )
+            logger.info(
+                "[TCP] %s:%s → %s:%s | flags=%s",
+                src, sport, dst, dport, description
+            )
             stats["TCP"] += 1
 
         elif UDP in packet:
             sport = packet[UDP].sport  # puerto origen
             dport = packet[UDP].dport  # puerto destino
-            if not args.silent:
-                print(
-                    f"{colorama.Fore.BLUE}[UDP]{colorama.Fore.RESET} "
-                    f"{src}:{sport} → {dst}:{dport}"
-                )
+            logger.info(
+                "[UDP] %s:%s → %s:%s",
+                src, sport, dst, dport
+            )
             stats["UDP"] += 1
 
         elif ICMP in packet:
@@ -217,16 +224,14 @@ def protocol_counter(packet):
                 11: "time-exceeded",
             }
             tipo = types.get(packet[ICMP].type, packet[ICMP].type)
-            if not args.silent:
-                print(
-                    f"{colorama.Fore.YELLOW}[ICMP]{colorama.Fore.RESET} "
-                    f"{src} → {dst} | tipo={tipo}"
-                )
+            logger.info(
+                "[ICMP] %s → %s | tipo=%s",
+                src, dst, tipo
+            )
             stats["ICMP"] += 1
 
         else:
-            if not args.silent:
-                print(f"Just IP --- {packet}")
+            logger.info("Just IP --- %s", packet.summary())
             stats["IP"] += 1  # Solo IP :(
 
     elif ARP in packet:
@@ -249,6 +254,11 @@ def protocol_counter(packet):
                 hwsrc,
                 f"Ether.src={ether_src} != ARP.hwsrc={hwsrc}",
                 now,
+                meta={
+                    "event": "arp_mismatch",
+                    "hwsrc": hwsrc,
+                    "ethersrc": ether_src
+                }
             )
 
         # el scan si es especifico de los requests: quien barre la subnet pregunta
@@ -261,33 +271,41 @@ def protocol_counter(packet):
                     hwsrc,
                     f"from {hwsrc} ({len(arp_tracker[hwsrc])} requests en {ARP_WINDOW}s)",
                     now,
+                    meta={
+                        "event": "arp_scan",
+                        "src_mac": hwsrc,
+                        "request_count": len(arp_tracker[hwsrc]),
+                        "window_s": ARP_WINDOW
+                    }
                 )
             prune_tracker(arp_tracker, now, ARP_WINDOW)
 
-        if not args.silent:
-            print(
-                f"{colorama.Fore.CYAN}[ARP]{colorama.Fore.RESET} "
-                f"{hwsrc} --> {hwdst} | {op}"
-            )
+        logger.info(
+            "[ARP] %s --> %s | %s",
+            hwsrc, hwdst, op
+        )
         stats["ARP"] += 1
 
     else:
         stats["OTHER"] += 1  # IPv6, etc
 
-    if not args.silent:
-        show_payload(packet)
+    show_payload(packet)
 
 
 def show_payload(packet, indent="    "):
+    # Optimizacion: Si estamos en modo silencioso, evitamos decodificar payloads
+    if not logger.isEnabledFor(logging.INFO):
+        return
+
     if Raw not in packet:
         return  # protocolo puro, sin datos de aplicación (ej: SYN, ARP)
 
     data = bytes(packet[Raw].load)
     try:
         txt = data.decode("utf-8")
-        print(f"{indent}└─ payload ({len(data)}b): {txt!r}")
+        logger.info("%s└─ payload (%sb): %r", indent, len(data), txt)
     except UnicodeDecodeError:
-        print(f"{indent}└─ payload ({len(data)}b, binario): {data[:64].hex()}")
+        logger.info("%s└─ payload (%sb, binario): %s", indent, len(data), data[:64].hex())
 
 
 # ---------------------------------------------------------------- main
@@ -298,6 +316,9 @@ def main():
 
     auxiliar.greeting_text("Welcome to the Sniffer!!!")
     args = argument_parser()
+
+    # Delegamos la configuracion a la funcion importada
+    configure_logger(name="sniffer", silent=args.silent)
 
     pcap_path = get_path()  # se guarda una sola vez y se reusa al final
     writer = PcapWriter(pcap_path, append=True, sync=True)
@@ -311,7 +332,7 @@ def main():
             count=args.count,
         )
     except Scapy_Exception as e:
-        print(f"Invalid filter: {e}\nThese are some examples")
+        logger.error("Invalid filter: %s\nThese are some examples", e)
         examples = [
             "tcp",
             "udp",
@@ -332,7 +353,7 @@ def main():
         auxiliar.show_options(examples)
         return
     except (ValueError, OSError) as e:
-        print(f"Invalid interface: {e}\nThese are some examples")
+        logger.error("Invalid interface: %s\nThese are some examples", e)
         auxiliar.show_options(get_if_list())
         return
     except KeyboardInterrupt:
